@@ -2293,22 +2293,11 @@
               if (profile) {
                 userDataCache = profile;
                 currentUserPhone = profile.phone || currentUserPhone;
-
-                // Répare automatiquement l'index de parrainage des anciens comptes.
-                if (profile.referralCode) {
-                  await ensureReferralIndex(user.uid, profile.referralCode);
-                }
-                // Répare automatiquement l'index d'équipe des anciens comptes.
-                if (profile.referredByUid) {
-                  await saveReferralRelationForCurrentUser(profile);
-                }
-
                 updateAccountStats();
                 renderMyProducts();
               } else {
                 userDataCache = createEmptyUserData(currentUserPhone || '');
                 await window.ldciSaveProfile(user.uid, userDataCache);
-                await ensureReferralIndex(user.uid, userDataCache.referralCode);
               }
               switchView('home');
             } else {
@@ -2418,111 +2407,27 @@
         // ================= GESTION AUTOMATIQUE DU CODE DE PARRAINAGE DANS L'URL =================
         window.addEventListener('DOMContentLoaded', () => {
             const urlParams = new URLSearchParams(window.location.search);
-            const refParam = (urlParams.get('ref') || '').trim().toUpperCase();
-            const sponsorParam = (urlParams.get('sponsor') || '').trim();
-
-            // On conserve le parrainage même si le navigateur recharge la page
-            // ou si l'utilisateur passe par une autre vue avant l'inscription.
+            const refParam = urlParams.get('ref');
             if (refParam) {
-                window.ldciReferralCode = refParam;
-                try { localStorage.setItem('ldciReferralCode', refParam); } catch(e) {}
                 const inviteInput = document.getElementById('reg-invite');
-                if (inviteInput) inviteInput.value = refParam;
-            } else {
-                try { window.ldciReferralCode = localStorage.getItem('ldciReferralCode') || ''; } catch(e) { window.ldciReferralCode = ''; }
-                const inviteInput = document.getElementById('reg-invite');
-                if (inviteInput && window.ldciReferralCode) inviteInput.value = window.ldciReferralCode;
-            }
-
-            if (sponsorParam) {
-                window.ldciReferralSponsorUid = sponsorParam;
-                try { localStorage.setItem('ldciReferralSponsorUid', sponsorParam); } catch(e) {}
-            } else {
-                try { window.ldciReferralSponsorUid = localStorage.getItem('ldciReferralSponsorUid') || ''; } catch(e) { window.ldciReferralSponsorUid = ''; }
+                if (inviteInput) {
+                    inviteInput.value = refParam.trim().toUpperCase();
+                }
             }
         });
 
-        // ================= INDEX DE PARRAINAGE FIRESTORE =================
-        // Le document referralCodes/{CODE} permet de retrouver directement le UID
-        // du parrain sans dépendre d'une requête sur toute la collection users.
-        async function ensureReferralIndex(uid, referralCode) {
-            if (!uid || !referralCode || !window.firebaseDb) return false;
-            const code = String(referralCode).trim().toUpperCase();
-            if (!code) return false;
+        async function findUserByReferralCode(refCode) {
+            if (!refCode) return null;
             try {
-                await setDoc(
-                    doc(window.firebaseDb, 'referralCodes', code),
-                    {
-                        uid: String(uid),
-                        referralCode: code,
-                        updatedAt: new Date().toISOString()
-                    },
-                    { merge: true }
-                );
-                return true;
-            } catch (e) {
-                console.warn('Index referralCodes non écrit :', e);
-                return false;
-            }
-        }
-
-        async function findUserByReferralCode(refCode, sponsorUidHint = '') {
-            const wanted = String(refCode || '').trim().toUpperCase();
-            if (!wanted || !window.firebaseDb) return null;
-
-            // 1) Méthode prioritaire : UID fourni par le lien de parrainage.
-            if (sponsorUidHint) {
-                try {
-                    const directSnap = await getDoc(doc(window.firebaseDb, 'users', sponsorUidHint));
-                    if (directSnap.exists()) {
-                        const profile = directSnap.data();
-                        if (String(profile.referralCode || '').trim().toUpperCase() === wanted) {
-                            return { uid: directSnap.id, ...profile };
-                        }
-                    }
-                } catch (e) {
-                    console.warn('Lecture directe du parrain impossible :', e);
-                }
-            }
-
-            // 2) Index referralCodes/{CODE}.
-            try {
-                const indexSnap = await getDoc(doc(window.firebaseDb, 'referralCodes', wanted));
-                if (indexSnap.exists()) {
-                    const indexData = indexSnap.data() || {};
-                    if (indexData.uid) {
-                        const sponsorSnap = await getDoc(doc(window.firebaseDb, 'users', indexData.uid));
-                        if (sponsorSnap.exists()) {
-                            const profile = sponsorSnap.data();
-                            if (!profile.referralCode || String(profile.referralCode).trim().toUpperCase() === wanted) {
-                                return { uid: sponsorSnap.id, ...profile };
-                            }
-                        }
-                        // Le UID reste exploitable même si la lecture du profil est limitée.
-                        return { uid: indexData.uid, referralCode: wanted };
-                    }
-                }
-            } catch (e) {
-                console.warn('Lecture index referralCodes impossible :', e);
-            }
-
-            // 3) Compatibilité avec les anciens comptes.
-            try {
-                const q = query(
-                    collection(window.firebaseDb, 'users'),
-                    where('referralCode', '==', wanted)
-                );
+                const q = query(collection(window.firebaseDb, 'users'), where('referralCode', '==', refCode));
                 const querySnapshot = await getDocs(q);
                 if (!querySnapshot.empty) {
                     const docSnap = querySnapshot.docs[0];
-                    const profile = { uid: docSnap.id, ...docSnap.data() };
-                    await ensureReferralIndex(profile.uid, profile.referralCode);
-                    return profile;
+                    return { uid: docSnap.id, ...docSnap.data() };
                 }
             } catch (e) {
                 console.error("Erreur recherche parrain:", e);
             }
-
             return null;
         }
 
@@ -2662,27 +2567,15 @@
 
             const tempReferralCode = 'LDCI-' + Math.floor(100000 + Math.random() * 900000);
             let sponsorUser = null;
-            const sponsorUidHint = String(window.ldciReferralSponsorUid || '').trim();
-
             if (inviteCode) {
-                // Le CODE est la référence principale. Le UID présent dans le lien
-                // sert d'accélérateur, mais ne doit jamais faire échouer un lien valide.
-                const sponsorUidHint = String(window.ldciReferralSponsorUid || '').trim();
-                sponsorUser = await findUserByReferralCode(inviteCode, sponsorUidHint);
-
-                // Compatibilité maximale : si l'UID du lien est ancien/invalide,
-                // on retente uniquement avec le code. Ainsi ?ref=CODE suffit.
-                if (!sponsorUser && sponsorUidHint) {
-                    sponsorUser = await findUserByReferralCode(inviteCode, '');
-                }
-
+                sponsorUser = await findUserByReferralCode(inviteCode);
                 if (!sponsorUser) {
-                    showNotification("Lien de parrainage invalide ou expiré. Vérifiez le code d'invitation.", "error");
+                    showNotification("Le code de parrainage est invalide ou n'existe pas.", "error");
                     return;
                 }
-
-                if (sponsorUser.uid && currentUser && sponsorUser.uid === currentUser) {
-                    showNotification("Vous ne pouvez pas utiliser votre propre lien de parrainage.", "error");
+                const isValidHierarchy = await validateReferralHierarchy(tempReferralCode, inviteCode);
+                if (!isValidHierarchy || sponsorUser.uid === currentUser) {
+                    showNotification("Auto-parrainage ou relation de parrainage invalide.", "error");
                     return;
                 }
             }
@@ -2701,12 +2594,8 @@
 
                 const data = createEmptyUserData(phone, inviteCode);
                 data.referralCode = tempReferralCode;
-                // Relation Firebase obligatoire : B -> A
-                // Le UID provenant du lien est prioritaire, car il ne dépend pas
-                // d'une lecture du profil du parrain.
-                data.referredBy = sponsorUser ? String(sponsorUser.referralCode || inviteCode || '').trim().toUpperCase() : '';
-                data.referredByUid = sponsorUser ? String(sponsorUser.uid || '').trim() : '';
-                data.sponsorUid = data.referredByUid;
+                data.referredBy = sponsorUser ? sponsorUser.referralCode : '';
+                data.referredByUid = sponsorUser ? sponsorUser.uid : '';
                 data.password = pass;
                 data.balance = 1000;
                 data.welcomeBonusGranted = true;
@@ -2719,15 +2608,6 @@
                     status: 'Réussi'
                 });
                 await window.ldciCreateProfile(uid, data);
-
-                // La relation B -> A est déjà enregistrée dans le document users/{B}.
-                // L'index du nouveau code est créé pour les prochains filleuls.
-                // Si les règles refusent cet index, l'inscription reste valide :
-                // la relation referredByUid reste la source principale.
-                await ensureReferralIndex(uid, data.referralCode);
-                // Enregistre B -> A dans un index dédié à l'équipe.
-                await saveReferralRelationForCurrentUser(data);
-
                 userDataCache = data;
 
                 showNotification("Inscription réussie ! Prime de bienvenue créditée.", "success");
@@ -3076,11 +2956,6 @@
 
                     data.investments.push(newInvestment);
                     await saveCurrentUserData(data);
-                    // Met à jour l'index d'équipe : ce membre devient acheteur.
-                    await saveReferralRelationForCurrentUser(data, {
-                        hasInvestment: true,
-                        investmentCount: data.investments.length
-                    });
 
                     saveTransaction('autre', cost, `Investissement (${selectedProduct.name})`, 'Réussi');
 
@@ -3272,12 +3147,7 @@
             let data = getCurrentUserData();
             if (!data) return;
             document.getElementById('ref-code-input').value = data.referralCode;
-            // Le lien transporte aussi le UID du parrain : la relation B -> A
-            // peut ainsi être enregistrée même si une requête Firestore est limitée.
-            document.getElementById('ref-link-input').value =
-                window.location.origin + window.location.pathname +
-                "?ref=" + encodeURIComponent(data.referralCode) +
-                "&sponsor=" + encodeURIComponent(currentUser);
+            document.getElementById('ref-link-input').value = window.location.origin + window.location.pathname + "?ref=" + data.referralCode;
         }
 
         function copyReferralCode() {
@@ -3293,150 +3163,69 @@
         }
 
         // ================= GESTION DE L'ÉQUIPE ET DES 3 NIVEAUX =================
-        // ================= INDEX D'ÉQUIPE DÉNORMALISÉ =================
-        // Chaque nouveau filleul crée son propre document referralRelations/{uid}.
-        // Cela permet à l'équipe d'être reconstruite sans lire toute la collection users.
-        async function saveReferralRelationForCurrentUser(data, extra = {}) {
-            if (!currentUser || !data || !data.referredByUid) return false;
-            try {
-                const relationRef = doc(window.firebaseDb, 'referralRelations', currentUser);
-                await setDoc(relationRef, {
-                    memberUid: currentUser,
-                    sponsorUid: String(data.referredByUid),
-                    sponsorCode: String(data.referredBy || '').trim().toUpperCase(),
-                    memberCode: String(data.referralCode || '').trim().toUpperCase(),
-                    phone: data.phone || currentUserPhone || '',
-                    createdAt: data.createdAt || new Date().toLocaleString('fr-FR'),
-                    totalRecharge: Number(data.totalRecharge || 0),
-                    hasInvestment: Array.isArray(data.investments) && data.investments.length > 0,
-                    investmentCount: Array.isArray(data.investments) ? data.investments.length : 0,
-                    updatedAt: new Date().toISOString(),
-                    ...extra
-                }, { merge: true });
-                return true;
-            } catch (e) {
-                console.warn('Index équipe non écrit :', e);
-                return false;
-            }
-        }
-
-        async function getReferralRelationsBySponsor(sponsorUid, sponsorCode = '') {
-            const resultMap = new Map();
-            if (!sponsorUid) return [];
-
-            const uid = String(sponsorUid).trim();
-            const normalizedCode = String(sponsorCode || '').trim().toUpperCase();
-
-            // 1) Recherche normale par UID du parrain.
-            try {
-                const qUid = query(
-                    collection(window.firebaseDb, 'users'),
-                    where('referredByUid', '==', uid)
-                );
-                const snapUid = await getDocs(qUid);
-                snapUid.forEach(d => {
-                    const u = d.data() || {};
-                    if (d.id !== uid) resultMap.set(d.id, { uid: d.id, ...u });
-                });
-            } catch (e) {
-                console.warn('Recherche équipe par referredByUid impossible:', e);
-            }
-
-            // 2) Compatibilité avec les anciens comptes utilisant uniquement
-            // le code du parrain.
-            if (normalizedCode) {
-                try {
-                    const qCode = query(
-                        collection(window.firebaseDb, 'users'),
-                        where('referredBy', '==', normalizedCode)
-                    );
-                    const snapCode = await getDocs(qCode);
-                    snapCode.forEach(d => {
-                        const u = d.data() || {};
-                        if (d.id !== uid) resultMap.set(d.id, { uid: d.id, ...u });
-                    });
-                } catch (e) {
-                    console.warn('Recherche équipe par referredBy impossible:', e);
-                }
-            }
-
-            // 3) SECOURS ROBUSTE : si les requêtes indexées ne renvoient rien,
-            // on lit les profils users et on compare UID/code côté client.
-            // Cela permet de récupérer les anciens filleuls même si leur champ
-            // referredByUid n'existe pas ou si le code n'a pas la même casse.
-            if (resultMap.size === 0) {
-                try {
-                    const allSnap = await getDocs(collection(window.firebaseDb, 'users'));
-                    allSnap.forEach(d => {
-                        const u = d.data() || {};
-                        if (d.id === uid) return;
-                        const parentUid = String(u.referredByUid || u.sponsorUid || '').trim();
-                        const parentCode = String(u.referredBy || '').trim().toUpperCase();
-                        if (parentUid === uid || (normalizedCode && parentCode === normalizedCode)) {
-                            resultMap.set(d.id, { uid: d.id, ...u });
-                        }
-                    });
-                } catch (e) {
-                    console.warn('Lecture de secours de users impossible:', e);
-                }
-            }
-
-            // 4) Dernier secours : index referralRelations, s'il existe.
-            try {
-                const q = query(
-                    collection(window.firebaseDb, 'referralRelations'),
-                    where('sponsorUid', '==', uid)
-                );
-                const snap = await getDocs(q);
-                snap.forEach(d => {
-                    const relation = d.data() || {};
-                    const memberUid = relation.memberUid || d.id;
-                    if (memberUid !== uid && !resultMap.has(memberUid)) {
-                        resultMap.set(memberUid, { uid: memberUid, ...relation });
-                    }
-                });
-            } catch (e) {
-                console.warn('Index referralRelations indisponible:', e);
-            }
-
-            return Array.from(resultMap.values());
-        }
-
         async function loadTeamData() {
             const data = getCurrentUserData();
             if (!data || !currentUser) return;
 
             try {
-                const B = await getReferralRelationsBySponsor(
-                    currentUser,
-                    data.referralCode || ''
+                const getDirectMembers = async (sponsorUid, sponsorReferralCode = '') => {
+                    const result = new Map();
+
+                    try {
+                        const qUid = query(
+                            collection(window.firebaseDb, 'users'),
+                            where('referredByUid', '==', sponsorUid)
+                        );
+                        const snapUid = await getDocs(qUid);
+                        snapUid.forEach(d => result.set(d.id, { uid: d.id, ...d.data() }));
+                    } catch (err) {
+                        console.warn('Lecture équipe par referredByUid impossible:', err);
+                    }
+
+                    if (sponsorReferralCode) {
+                        try {
+                            const qCode = query(
+                                collection(window.firebaseDb, 'users'),
+                                where('referredBy', '==', sponsorReferralCode)
+                            );
+                            const snapCode = await getDocs(qCode);
+                            snapCode.forEach(d => {
+                                const u = { uid: d.id, ...d.data() };
+                                if (!u.referredByUid) result.set(d.id, u);
+                            });
+                        } catch (err) {
+                            console.warn('Lecture équipe par referredBy impossible:', err);
+                        }
+                    }
+
+                    return Array.from(result.values());
+                };
+
+                // NIVEAU B : Filleuls directs
+                const B = await getDirectMembers(currentUser, data.referralCode || '');
+
+                // NIVEAU C : Filleuls des filleuls B
+                const cArrays = await Promise.all(
+                    B.map(b => getDirectMembers(b.uid, b.referralCode || ''))
+                );
+                const C = Array.from(
+                    new Map(cArrays.flat().map(u => [u.uid, u])).values()
+                ).filter(u => u.uid !== currentUser && !B.some(b => b.uid === u.uid));
+
+                // NIVEAU D : Filleuls des filleuls C
+                const dArrays = await Promise.all(
+                    C.map(c => getDirectMembers(c.uid, c.referralCode || ''))
+                );
+                const D = Array.from(
+                    new Map(dArrays.flat().map(u => [u.uid, u])).values()
+                ).filter(u =>
+                    u.uid !== currentUser &&
+                    !B.some(b => b.uid === u.uid) &&
+                    !C.some(c => c.uid === u.uid)
                 );
 
-                // Niveau C = filleuls directs des B.
-                const cArrays = await Promise.all(B.map(b => getReferralRelationsBySponsor(
-                    b.uid || b.memberUid,
-                    b.referralCode || b.memberCode || ''
-                )));
-                const C = Array.from(new Map(cArrays.flat().map(u => [u.uid, u])).values())
-                    .filter(u => u.uid !== currentUser && !B.some(b => b.uid === u.uid));
-
-                // Niveau D = filleuls directs des C.
-                const dArrays = await Promise.all(C.map(c => getReferralRelationsBySponsor(
-                    c.uid || c.memberUid,
-                    c.referralCode || c.memberCode || ''
-                )));
-                const D = Array.from(new Map(dArrays.flat().map(u => [u.uid, u])).values())
-                    .filter(u =>
-                        u.uid !== currentUser &&
-                        !B.some(b => b.uid === u.uid) &&
-                        !C.some(c => c.uid === u.uid)
-                    );
-
                 const totalMembers = B.length + C.length + D.length;
-                const hasInvestment = u =>
-                    Boolean(u.hasInvestment) ||
-                    Number(u.investmentCount || 0) > 0 ||
-                    (Array.isArray(u.investments) && u.investments.length > 0);
+                const hasInvestment = u => Array.isArray(u.investments) && u.investments.length > 0;
                 const buyerCountB = B.filter(hasInvestment).length;
                 const buyerCountC = C.filter(hasInvestment).length;
                 const buyerCountD = D.filter(hasInvestment).length;
@@ -3446,28 +3235,35 @@
                     (sum, u) => sum + Number(u.totalRecharge || 0), 0
                 );
 
-                const setText = (id, value) => {
-                    const el = document.getElementById(id);
-                    if (el) el.innerText = value;
-                };
-                setText('team-total-members-display', totalMembers);
-                setText('team-total-recharge-display', teamRechargeTotal.toLocaleString());
-                setText('team-count-total', totalMembers);
-                setText('team-count-b', B.length);
-                setText('team-count-c', C.length);
-                setText('team-count-d', D.length);
-                setText('buyer-count-total', totalBuyers);
-                setText('buyer-count-b', buyerCountB);
-                setText('buyer-count-c', buyerCountC);
-                setText('buyer-count-d', buyerCountD);
+                document.getElementById('team-total-members-display').innerText = totalMembers;
+                document.getElementById('team-total-recharge-display').innerText = teamRechargeTotal.toLocaleString();
+                document.getElementById('team-count-total').innerText = totalMembers;
+                document.getElementById('team-count-b').innerText = B.length;
+                document.getElementById('team-count-c').innerText = C.length;
+                document.getElementById('team-count-d').innerText = D.length;
+                document.getElementById('buyer-count-total').innerText = totalBuyers;
+                document.getElementById('buyer-count-b').innerText = buyerCountB;
+                document.getElementById('buyer-count-c').innerText = buyerCountC;
+                document.getElementById('buyer-count-d').innerText = buyerCountD;
 
                 window.teamCache = { B, C, D };
                 renderTeamTable(currentTeamTabLevel);
             } catch (e) {
                 console.error('Erreur chargement équipe:', e);
-                window.teamCache = { B: [], C: [], D: [] };
-                renderTeamTable(currentTeamTabLevel);
+                showNotification(
+                    "Impossible de charger l’équipe. Vérifiez les autorisations Firestore ou votre connexion.",
+                    'error'
+                );
             }
+        }
+
+        function switchTeamTab(level) {
+            currentTeamTabLevel = level;
+            document.querySelectorAll('.team-tab').forEach(b => b.classList.remove('active'));
+            const activeBtn = document.getElementById('team-tab-' + level);
+            if(activeBtn) activeBtn.classList.add('active');
+
+            renderTeamTable(level);
         }
 
         function renderTeamTable(level) {
