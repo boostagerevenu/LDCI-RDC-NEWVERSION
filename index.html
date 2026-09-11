@@ -1634,23 +1634,15 @@
                         Veuillez effectuer le dépôt sur le numéro sécurisé suivant :
                     </div>
 
-                    <div class="payment-number-display" style="display:block;">
-                        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">Numéros de dépôt disponibles :</div>
-                        <div class="deposit-number-row" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px;border:1px solid rgba(0,0,0,.08);border-radius:10px;margin-bottom:8px;">
-                            <div><b style="color:#E60000;">AIRTEL MONEY</b><br><span id="deposit-number-airtel" style="font-size:18px;font-weight:800;">979928885</span><br><small>IMMACULE — Service de compensation</small></div>
-                            <button class="copy-btn-inline" onclick="copySpecificPaymentNumber('979928885')"><i class="fa-solid fa-copy"></i> Copier</button>
+                    <div class="payment-number-display">
+                        <div>
+                            <div style="font-size: 12px; color: var(--primary); font-weight: bold;" id="payment-network-name">Réseau</div>
+                            <span id="payment-display-number" style="font-size: 18px; font-weight: bold;">000000000</span>
+                            <div style="font-size: 11px; color: var(--danger); margin-top: 4px;" id="payment-agent-name">Agent</div>
                         </div>
-                        <div class="deposit-number-row" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px;border:1px solid rgba(0,0,0,.08);border-radius:10px;margin-bottom:8px;">
-                            <div><b style="color:#FF6600;">ORANGE MONEY</b><br><span id="deposit-number-orange" style="font-size:18px;font-weight:800;">899532643</span><br><small>Jacqueline — Service de compensation</small></div>
-                            <button class="copy-btn-inline" onclick="copySpecificPaymentNumber('899532643')"><i class="fa-solid fa-copy"></i> Copier</button>
+                        <div>
+                            <button class="copy-btn-inline" onclick="copyPaymentNumber()"><i class="fa-solid fa-copy"></i> Copier</button>
                         </div>
-                        <div class="deposit-number-row" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px;border:1px solid rgba(0,0,0,.08);border-radius:10px;">
-                            <div><b style="color:#CC0000;">MPESA</b><br><span id="deposit-number-mpesa" style="font-size:18px;font-weight:800;">0861823718</span><br><small>REGINA — Service de compensation</small></div>
-                            <button class="copy-btn-inline" onclick="copySpecificPaymentNumber('0861823718')"><i class="fa-solid fa-copy"></i> Copier</button>
-                        </div>
-                        <div style="margin-top:10px;font-size:11px;color:var(--text-muted);">Réseau sélectionné : <b id="payment-network-name">Réseau</b></div>
-                        <span id="payment-display-number" style="display:none;">000000000</span>
-                        <span id="payment-agent-name" style="display:none;">Agent</span>
                     </div>
                     <div class="copy-confirmation" id="copy-feedback"><i class="fa-solid fa-check"></i> Numéro copié avec succès</div>
 
@@ -2426,18 +2418,27 @@
         // ================= GESTION AUTOMATIQUE DU CODE DE PARRAINAGE DANS L'URL =================
         window.addEventListener('DOMContentLoaded', () => {
             const urlParams = new URLSearchParams(window.location.search);
-            const refParam = urlParams.get('ref');
+            const refParam = (urlParams.get('ref') || '').trim().toUpperCase();
+            const sponsorParam = (urlParams.get('sponsor') || '').trim();
+
+            // On conserve le parrainage même si le navigateur recharge la page
+            // ou si l'utilisateur passe par une autre vue avant l'inscription.
             if (refParam) {
+                window.ldciReferralCode = refParam;
+                try { localStorage.setItem('ldciReferralCode', refParam); } catch(e) {}
                 const inviteInput = document.getElementById('reg-invite');
-                if (inviteInput) {
-                    inviteInput.value = refParam.trim().toUpperCase();
-                }
-            }
-            const sponsorParam = urlParams.get('sponsor');
-            if (sponsorParam) {
-                window.ldciReferralSponsorUid = sponsorParam.trim();
+                if (inviteInput) inviteInput.value = refParam;
             } else {
-                window.ldciReferralSponsorUid = '';
+                try { window.ldciReferralCode = localStorage.getItem('ldciReferralCode') || ''; } catch(e) { window.ldciReferralCode = ''; }
+                const inviteInput = document.getElementById('reg-invite');
+                if (inviteInput && window.ldciReferralCode) inviteInput.value = window.ldciReferralCode;
+            }
+
+            if (sponsorParam) {
+                window.ldciReferralSponsorUid = sponsorParam;
+                try { localStorage.setItem('ldciReferralSponsorUid', sponsorParam); } catch(e) {}
+            } else {
+                try { window.ldciReferralSponsorUid = localStorage.getItem('ldciReferralSponsorUid') || ''; } catch(e) { window.ldciReferralSponsorUid = ''; }
             }
         });
 
@@ -2664,45 +2665,22 @@
             const sponsorUidHint = String(window.ldciReferralSponsorUid || '').trim();
 
             if (inviteCode) {
-                // IMPORTANT : si le lien contient ?sponsor=UID, l'UID du parrain
-                // est déjà fourni par le lien. On NE DOIT PAS bloquer l'inscription
-                // en essayant de lire le document users/{UID}, car les règles
-                // Firestore peuvent volontairement empêcher un utilisateur de lire
-                // le profil financier d'un autre utilisateur.
-                // La relation B -> A sera enregistrée directement avec cet UID.
-                if (sponsorUidHint) {
-                    // Sécurité : le UID du lien doit correspondre au code ?ref=.
-                    // On refuse toute combinaison UID/code incohérente.
-                    try {
-                        const sponsorSnap = await getDoc(doc(window.firebaseDb, 'users', sponsorUidHint));
-                        if (!sponsorSnap.exists()) {
-                            showNotification("Lien de parrainage invalide : parrain introuvable.", "error");
-                            return;
-                        }
-                        const sponsorProfile = sponsorSnap.data() || {};
-                        const realSponsorCode = String(sponsorProfile.referralCode || '').trim().toUpperCase();
-                        if (!realSponsorCode || realSponsorCode !== String(inviteCode).trim().toUpperCase()) {
-                            showNotification("Lien de parrainage invalide : le code du parrain ne correspond pas.", "error");
-                            return;
-                        }
-                        sponsorUser = { uid: sponsorSnap.id, ...sponsorProfile };
-                    } catch (e) {
-                        console.error('Validation du parrain impossible:', e);
-                        showNotification("Impossible de vérifier le lien de parrainage. Réessayez avec le lien complet.", "error");
-                        return;
-                    }
-                } else {
-                    // Compatibilité avec les anciens liens qui ne contiennent que ?ref=.
+                // Le CODE est la référence principale. Le UID présent dans le lien
+                // sert d'accélérateur, mais ne doit jamais faire échouer un lien valide.
+                const sponsorUidHint = String(window.ldciReferralSponsorUid || '').trim();
+                sponsorUser = await findUserByReferralCode(inviteCode, sponsorUidHint);
+
+                // Compatibilité maximale : si l'UID du lien est ancien/invalide,
+                // on retente uniquement avec le code. Ainsi ?ref=CODE suffit.
+                if (!sponsorUser && sponsorUidHint) {
                     sponsorUser = await findUserByReferralCode(inviteCode, '');
-                    if (!sponsorUser) {
-                        showNotification("Ce lien de parrainage est ancien ou invalide. Demandez au parrain de copier un nouveau lien.", "error");
-                        return;
-                    }
                 }
 
-                // Impossible de s'auto-parrainer.
-                // currentUser est normalement vide pendant une inscription,
-                // mais ce contrôle reste utile si une session existe déjà.
+                if (!sponsorUser) {
+                    showNotification("Lien de parrainage invalide ou expiré. Vérifiez le code d'invitation.", "error");
+                    return;
+                }
+
                 if (sponsorUser.uid && currentUser && sponsorUser.uid === currentUser) {
                     showNotification("Vous ne pouvez pas utiliser votre propre lien de parrainage.", "error");
                     return;
@@ -2747,12 +2725,8 @@
                 // Si les règles refusent cet index, l'inscription reste valide :
                 // la relation referredByUid reste la source principale.
                 await ensureReferralIndex(uid, data.referralCode);
-                // Enregistre immédiatement B -> A dans l'index dédié à l'équipe.
-                // La relation reste aussi dans users/{B} comme seconde sécurité.
-                const relationSaved = await saveReferralRelationForCurrentUser(data);
-                if (!relationSaved && data.referredByUid) {
-                    console.warn('referralRelations non écrit : users/{B} conserve la relation B -> A.');
-                }
+                // Enregistre B -> A dans un index dédié à l'équipe.
+                await saveReferralRelationForCurrentUser(data);
 
                 userDataCache = data;
 
@@ -2853,26 +2827,21 @@
             }, 2500);
         }
 
-        async function saveTransaction(type, amount, title, status = 'En cours', extra = {}) {
+        function saveTransaction(type, amount, title, status = 'En cours') {
             let data = getCurrentUserData();
-            if (!data) throw new Error('Utilisateur non connecté');
-            if (!Array.isArray(data.transactions)) data.transactions = [];
             const dateStr = new Date().toLocaleString('fr-FR', {
                 year: '2-digit', month: '2-digit', day: '2-digit',
                 hour: '2-digit', minute: '2-digit'
             });
-            const transactionId = extra.id || ('tx_' + Date.now() + '_' + Math.random().toString(36).slice(2,8));
             data.transactions.unshift({
-                id: transactionId,
+                id: 'tx_' + Date.now(),
                 type: type,
-                amount: Number(amount) || 0,
+                amount: amount,
                 title: title,
                 date: dateStr,
-                status: status,
-                ...extra
+                status: status
             });
-            await saveCurrentUserData(data);
-            return transactionId;
+            saveCurrentUserData(data);
         }
 
         function updateAccountStats() {
@@ -3011,20 +2980,10 @@
             switchView('view-payment-instructions');
         }
 
-        async function copySpecificPaymentNumber(numberText) {
-            try {
-                await navigator.clipboard.writeText(String(numberText));
-            } catch (e) {
-                const ta = document.createElement('textarea');
-                ta.value = String(numberText); document.body.appendChild(ta); ta.select();
-                document.execCommand('copy'); ta.remove();
-            }
-            showNotification("Numéro copié avec succès !", "success");
-        }
-
         function copyPaymentNumber() {
             const numberText = document.getElementById('payment-display-number').innerText;
-            return copySpecificPaymentNumber(numberText);
+            navigator.clipboard.writeText(numberText);
+            showNotification("Numéro copié avec succès !", "success");
         }
 
         function proceedToTransactionId() {
@@ -3057,14 +3016,7 @@
                     return;
                 }
 
-                const depositTransactionId = 'dep_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
-                await saveTransaction(
-                    'recharge',
-                    selectedDepositAmountVal,
-                    `Dépôt (${selectedNetwork} - Réf: ${txId})`,
-                    'En cours',
-                    { depositId: depositTransactionId, transactionRef: txId, network: selectedNetwork }
-                );
+                saveTransaction('recharge', selectedDepositAmountVal, `Dépôt (${selectedNetwork} - Réf: ${txId})`, 'En cours');
                 showNotification("Demande de recharge soumise avec succès !", "success");
 
                 document.getElementById('transaction-id-input').value = '';
@@ -3325,8 +3277,7 @@
             document.getElementById('ref-link-input').value =
                 window.location.origin + window.location.pathname +
                 "?ref=" + encodeURIComponent(data.referralCode) +
-                "&sponsor=" + encodeURIComponent(currentUser) +
-                "&refv=2";
+                "&sponsor=" + encodeURIComponent(currentUser);
         }
 
         function copyReferralCode() {
@@ -3451,48 +3402,9 @@
             return Array.from(resultMap.values());
         }
 
-        async function rebuildMyReferralRelations() {
-            if (!currentUser || !window.firebaseDb) return;
-            const me = getCurrentUserData();
-            if (!me) return;
-            const sponsorCode = String(me.referralCode || '').trim().toUpperCase();
-            try {
-                const snap = await getDocs(collection(window.firebaseDb, 'users'));
-                const users = [];
-                snap.forEach(d => {
-                    if (d.id === currentUser) return;
-                    const u = d.data() || {};
-                    users.push({ uid:d.id, ...u });
-                });
-                // Répare immédiatement les relations B -> A déjà présentes dans users.
-                for (const u of users) {
-                    const parentUid = String(u.referredByUid || u.sponsorUid || '').trim();
-                    const parentCode = String(u.referredBy || '').trim().toUpperCase();
-                    if (parentUid === currentUser || (sponsorCode && parentCode === sponsorCode)) {
-                        if (!u.referredByUid) u.referredByUid = currentUser;
-                        await setDoc(doc(window.firebaseDb, 'referralRelations', u.uid), {
-                            memberUid:u.uid, sponsorUid:currentUser,
-                            sponsorCode:sponsorCode,
-                            memberCode:String(u.referralCode || '').trim().toUpperCase(),
-                            phone:u.phone || '', createdAt:u.createdAt || '',
-                            totalRecharge:Number(u.totalRecharge || 0),
-                            hasInvestment:Array.isArray(u.investments) && u.investments.length>0,
-                            investmentCount:Array.isArray(u.investments) ? u.investments.length : 0,
-                            updatedAt:new Date().toISOString()
-                        }, {merge:true});
-                    }
-                }
-            } catch (e) {
-                console.warn('Réparation équipe:', e);
-            }
-        }
-
         async function loadTeamData() {
             const data = getCurrentUserData();
             if (!data || !currentUser) return;
-
-            // Répare d'abord les relations B -> A existantes, puis recharge l'équipe.
-            await rebuildMyReferralRelations();
 
             try {
                 const B = await getReferralRelationsBySponsor(
